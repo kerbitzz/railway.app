@@ -135,7 +135,15 @@ def list_trackers():
     return jsonify({tid: url for tid, url in image_store.items()})
 
 
+import threading
+
+def run_bot():
+    import bot
+    bot.bot.run(os.environ.get("DISCORD_TOKEN", ""))
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print(f"[*] Image logger running on port {port}")
+    t = threading.Thread(target=run_bot, daemon=True)
+    t.start()
     app.run(host="0.0.0.0", port=port, debug=False)
